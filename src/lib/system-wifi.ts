@@ -93,26 +93,176 @@ class WindowsWifiAdapter implements WifiPlatformAdapter {
 
   async connectToNetwork(ssid: string, password?: string): Promise<boolean> {
     try {
-      let command = "";
-
       if (password) {
-        // 在Windows中创建临时配置文件连接需要复杂操作
-        // 此处简化操作，仅支持已保存的网络连接
-        logger.warn(
-          "Windows平台暂不支持带密码的直接连接，请先添加网络配置文件"
-        );
-        return false;
-      } else {
-        // 连接到已保存的网络
-        command = `netsh wlan connect name="${ssid}"`;
-      }
+        // 实现完整的Windows WiFi配置文件创建和连接流程
+        logger.info(`Creating Windows WiFi profile for ${ssid} with password`);
 
-      await execAsync(command);
-      return true;
+        // 首先检查是否已存在同名配置文件
+        try {
+          const { stdout: existingProfiles } = await execAsync("netsh wlan show profiles");
+          if (existingProfiles.includes(ssid)) {
+            logger.debug(`Profile for ${ssid} already exists, removing old profile`);
+            await execAsync(`netsh wlan delete profile name="${ssid}"`);
+          }
+        } catch (error) {
+          logger.debug("Error checking existing profiles:", error);
+          // 继续执行，不影响主流程
+        }
+
+        // 检测网络的安全类型
+        const securityType = await this.detectNetworkSecurity(ssid);
+        logger.debug(`Detected security type for ${ssid}: ${securityType}`);
+
+        // 创建WiFi配置文件XML
+        const profileXml = this.generateWifiProfileXml(ssid, password, securityType);
+
+        // 创建临时配置文件
+        const tempProfilePath = `${process.env.TEMP || 'C:\\temp'}\\wifi_profile_${Date.now()}.xml`;
+
+        try {
+          // 写入临时配置文件
+          await execAsync(`echo "${profileXml.replace(/"/g, '\\"')}" > "${tempProfilePath}"`);
+
+          // 添加配置文件到系统
+          await execAsync(`netsh wlan add profile filename="${tempProfilePath}"`);
+          logger.debug(`WiFi profile for ${ssid} added successfully`);
+
+          // 连接到网络
+          await execAsync(`netsh wlan connect name="${ssid}"`);
+          logger.info(`Successfully connected to ${ssid} using new profile`);
+
+          return true;
+        } finally {
+          // 清理临时文件
+          try {
+            await execAsync(`del "${tempProfilePath}"`);
+          } catch (cleanupError) {
+            logger.warn("Failed to cleanup temporary profile file:", cleanupError);
+          }
+        }
+      } else {
+        // 连接到已保存的网络（无密码或开放网络）
+        logger.debug(`Connecting to saved network: ${ssid}`);
+        await execAsync(`netsh wlan connect name="${ssid}"`);
+        return true;
+      }
     } catch (error) {
       logger.error(`连接到Windows WiFi网络失败: ${ssid}`, error);
+
+      // 提供更详细的错误信息
+      if (error instanceof Error) {
+        if (error.message.includes("profile")) {
+          logger.error("Profile creation failed - check network security settings");
+        } else if (error.message.includes("connect")) {
+          logger.error("Connection failed - network may be out of range or credentials incorrect");
+        }
+      }
+
       return false;
     }
+  }
+
+  /**
+   * 检测网络的安全类型
+   */
+  private async detectNetworkSecurity(ssid: string): Promise<string> {
+    try {
+      const { stdout } = await execAsync("netsh wlan show profiles");
+
+      // 如果网络已保存，获取其安全设置
+      if (stdout.includes(ssid)) {
+        const { stdout: profileInfo } = await execAsync(`netsh wlan show profile name="${ssid}" key=clear`);
+
+        if (profileInfo.includes("WPA2")) {
+          return "WPA2PSK";
+        } else if (profileInfo.includes("WPA3")) {
+          return "WPA3SAE";
+        } else if (profileInfo.includes("WEP")) {
+          return "WEP";
+        }
+      }
+
+      // 尝试从扫描结果中获取安全信息
+      const { stdout: scanResult } = await execAsync("netsh wlan show profiles");
+      logger.debug(`Profile scan result length: ${scanResult.length}`);
+
+      // 默认使用WPA2，这是最常见的安全类型
+      return "WPA2PSK";
+    } catch (error) {
+      logger.warn("Failed to detect network security type, defaulting to WPA2PSK:", error);
+      return "WPA2PSK";
+    }
+  }
+
+  /**
+   * 生成Windows WiFi配置文件XML
+   */
+  private generateWifiProfileXml(ssid: string, password: string, securityType: string): string {
+    // 转义XML特殊字符
+    const escapedSsid = ssid.replace(/[<>&"']/g, (match) => {
+      const escapeMap: { [key: string]: string } = {
+        '<': '&lt;',
+        '>': '&gt;',
+        '&': '&amp;',
+        '"': '&quot;',
+        "'": '&apos;'
+      };
+      return escapeMap[match];
+    });
+
+    const escapedPassword = password.replace(/[<>&"']/g, (match) => {
+      const escapeMap: { [key: string]: string } = {
+        '<': '&lt;',
+        '>': '&gt;',
+        '&': '&amp;',
+        '"': '&quot;',
+        "'": '&apos;'
+      };
+      return escapeMap[match];
+    });
+
+    let authType = "WPA2PSK";
+    let encryptionType = "AES";
+
+    switch (securityType) {
+      case "WPA3SAE":
+        authType = "WPA3SAE";
+        encryptionType = "AES";
+        break;
+      case "WEP":
+        authType = "open";
+        encryptionType = "WEP";
+        break;
+      default:
+        authType = "WPA2PSK";
+        encryptionType = "AES";
+    }
+
+    return `<?xml version="1.0"?>
+<WLANProfile xmlns="http://www.microsoft.com/networking/WLAN/profile/v1">
+  <name>${escapedSsid}</name>
+  <SSIDConfig>
+    <SSID>
+      <name>${escapedSsid}</name>
+    </SSID>
+  </SSIDConfig>
+  <connectionType>ESS</connectionType>
+  <connectionMode>auto</connectionMode>
+  <MSM>
+    <security>
+      <authEncryption>
+        <authentication>${authType}</authentication>
+        <encryption>${encryptionType}</encryption>
+        <useOneX>false</useOneX>
+      </authEncryption>
+      <sharedKey>
+        <keyType>passPhrase</keyType>
+        <protected>false</protected>
+        <keyMaterial>${escapedPassword}</keyMaterial>
+      </sharedKey>
+    </security>
+  </MSM>
+</WLANProfile>`;
   }
 
   async disconnectFromNetwork(): Promise<boolean> {
@@ -318,7 +468,7 @@ class MacOSWifiAdapter implements WifiPlatformAdapter {
       // 检查airport命令是否存在
       await execAsync(`ls ${this.airportCmd}`);
       return true;
-    } catch (error) {
+    } catch {
       try {
         // 尝试使用networksetup命令
         const { stdout } = await execAsync(
@@ -384,7 +534,7 @@ class MacOSWifiAdapter implements WifiPlatformAdapter {
           const { stdout } = await execAsync(
             `networksetup -getairportnetwork ${wifiDevice}`
           );
-          return this.parseCurrentNetworkFromNetworkSetup(stdout, wifiDevice);
+          return this.parseCurrentNetworkFromNetworkSetup(stdout);
         }
         return null;
       } catch (backupError) {
@@ -604,7 +754,7 @@ class MacOSWifiAdapter implements WifiPlatformAdapter {
           networks.push({
             ssid: trimmedLine,
             bssid: `saved_${trimmedLine.replace(/\s+/g, "_")}_${Date.now()}`,
-            security: SecurityType.UNKNOWN, // 无法从列表中确定安全类型
+            security: SecurityType.OPEN, // 无法从列表中确定安全类型，默认为开放
             signalStrength: 0, // 保存的网络可能不在范围内，信号为0
             type: NetworkType.WIFI,
             saved: true,
@@ -652,13 +802,74 @@ class MacOSWifiAdapter implements WifiPlatformAdapter {
   }
 
   private parseNetworkSetupList(output: string): WiFiNetwork[] {
-    // 简化实现，仅返回网络名称列表
-    return this.parsePreferredNetworks(output);
+    const networks: WiFiNetwork[] = [];
+    const lines = output.split("\n");
+
+    try {
+      // networksetup -listpreferredwirelessnetworks 的输出格式:
+      // Preferred networks on en0:
+      //     SSID_NAME_1
+      //     SSID_NAME_2
+      //     ...
+
+      let startParsing = false;
+      let deviceName = "";
+
+      for (const line of lines) {
+        const trimmedLine = line.trim();
+
+        // 检测设备行
+        const deviceMatch = line.match(/Preferred networks on (.+):/);
+        if (deviceMatch) {
+          deviceName = deviceMatch[1];
+          startParsing = true;
+          continue;
+        }
+
+        // 如果还没开始解析或行为空，跳过
+        if (!startParsing || !trimmedLine) continue;
+
+        // 检测是否是新设备的开始（停止当前设备的解析）
+        if (line.match(/Preferred networks on .+:/)) {
+          break;
+        }
+
+        // 解析网络名称（通常以空格开头）
+        if (line.startsWith("    ") || line.startsWith("\t")) {
+          const ssid = trimmedLine;
+
+          // 验证SSID不为空且不是错误消息
+          if (ssid && !ssid.includes("Error") && !ssid.includes("error")) {
+            networks.push({
+              ssid,
+              bssid: `saved_${ssid}_${Date.now()}`, // 生成唯一标识符
+              security: SecurityType.WPA2, // 默认安全类型
+              signalStrength: 0, // 保存的网络没有当前信号强度
+              type: NetworkType.WIFI,
+              saved: true,
+              settings: {
+                autoConnect: true,
+                redirectUrl: null,
+                hidden: false,
+                priority: networks.length + 1, // 基于列表顺序设置优先级
+                redirectTimeout: 3000,
+              },
+            });
+          }
+        }
+      }
+
+      logger.debug(`Parsed ${networks.length} networks from networksetup output for device ${deviceName}`);
+      return networks;
+    } catch (error) {
+      logger.error("Error parsing networksetup list output:", error);
+      // 回退到原始解析方法
+      return this.parsePreferredNetworks(output);
+    }
   }
 
   private parseCurrentNetworkFromNetworkSetup(
-    output: string,
-    device: string
+    output: string
   ): WiFiNetwork | null {
     try {
       // 格式通常是: "Current Wi-Fi Network: SSID_NAME"
@@ -720,7 +931,7 @@ class LinuxWifiAdapter implements WifiPlatformAdapter {
       await execAsync("which nmcli");
       this.useNmcli = true;
       return true;
-    } catch (error) {
+    } catch {
       try {
         // 尝试检测iwconfig是否可用
         await execAsync("which iwconfig");
@@ -910,7 +1121,7 @@ class LinuxWifiAdapter implements WifiPlatformAdapter {
           throw new Error("未找到无线网卡");
         }
 
-        const interface = wirelessInterfaces[0];
+        const networkInterface = wirelessInterfaces[0];
 
         // 创建临时wpa_supplicant配置文件
         const tempConfPath = "/tmp/wpa_supplicant_temp.conf";
@@ -921,7 +1132,7 @@ class LinuxWifiAdapter implements WifiPlatformAdapter {
 
         // 连接网络
         await execAsync(
-          `wpa_supplicant -B -i ${interface} -c ${tempConfPath} && dhclient ${interface}`
+          `wpa_supplicant -B -i ${networkInterface} -c ${tempConfPath} && dhclient ${networkInterface}`
         );
 
         // 删除临时文件
@@ -944,7 +1155,7 @@ class LinuxWifiAdapter implements WifiPlatformAdapter {
         const connections = stdout.trim().split("\n");
 
         for (const conn of connections) {
-          const [name, device, type] = conn.split(":");
+          const [name, , type] = conn.split(":");
           if (type === "wifi" || type === "802-11-wireless") {
             // 断开连接
             await execAsync(`nmcli connection down "${name}"`);
@@ -969,8 +1180,8 @@ class LinuxWifiAdapter implements WifiPlatformAdapter {
         }
 
         // 断开所有无线接口
-        for (const interface of wirelessInterfaces) {
-          await execAsync(`ifconfig ${interface} down`);
+        for (const networkInterface of wirelessInterfaces) {
+          await execAsync(`ifconfig ${networkInterface} down`);
         }
 
         return true;
@@ -1220,7 +1431,7 @@ class LinuxWifiAdapter implements WifiPlatformAdapter {
           networks.push({
             ssid: name,
             bssid: `saved_${name.replace(/\s+/g, "_")}_${Date.now()}`,
-            security: SecurityType.UNKNOWN, // 无法确定保存连接的安全类型
+            security: SecurityType.OPEN, // 无法确定保存连接的安全类型，默认为开放
             signalStrength: 0,
             type: NetworkType.WIFI,
             saved: true,
@@ -1262,7 +1473,7 @@ class LinuxWifiAdapter implements WifiPlatformAdapter {
           networks.push({
             ssid,
             bssid: `saved_${ssid.replace(/\s+/g, "_")}_${Date.now()}`,
-            security: SecurityType.UNKNOWN,
+            security: SecurityType.OPEN,
             signalStrength: 0,
             type: NetworkType.WIFI,
             saved: true,

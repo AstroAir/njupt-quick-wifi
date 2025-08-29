@@ -8,7 +8,7 @@ import { authMiddleware } from "@/lib/auth-middleware";
  */
 export async function GET(
   req: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     // Check authentication
@@ -20,7 +20,8 @@ export async function GET(
       );
     }
 
-    const networkId = params.id;
+    const resolvedParams = await params;
+    const networkId = resolvedParams.id;
     if (!networkId) {
       return NextResponse.json(
         { error: "Network ID is required" },
@@ -37,7 +38,7 @@ export async function GET(
 
     return NextResponse.json({ network });
   } catch (error) {
-    console.error(`Error fetching network ${params.id}:`, error);
+    console.error(`Error fetching network ${(await params).id}:`, error);
     return NextResponse.json(
       { error: "Failed to fetch network details" },
       { status: 500 }
@@ -51,7 +52,7 @@ export async function GET(
  */
 export async function PUT(
   req: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     // Check authentication
@@ -63,7 +64,8 @@ export async function PUT(
       );
     }
 
-    const networkId = params.id;
+    const resolvedParams = await params;
+    const networkId = resolvedParams.id;
     if (!networkId) {
       return NextResponse.json(
         { error: "Network ID is required" },
@@ -99,7 +101,7 @@ export async function PUT(
       network: updatedNetwork,
     });
   } catch (error) {
-    console.error(`Error updating network ${params.id}:`, error);
+    console.error(`Error updating network ${(await params).id}:`, error);
     return NextResponse.json(
       { error: "Failed to update network settings" },
       { status: 500 }
@@ -113,7 +115,7 @@ export async function PUT(
  */
 export async function DELETE(
   req: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     // Check authentication
@@ -125,7 +127,8 @@ export async function DELETE(
       );
     }
 
-    const networkId = params.id;
+    const resolvedParams = await params;
+    const networkId = resolvedParams.id;
     if (!networkId) {
       return NextResponse.json(
         { error: "Network ID is required" },
@@ -148,7 +151,7 @@ export async function DELETE(
       message: "Network forgotten",
     });
   } catch (error) {
-    console.error(`Error forgetting network ${params.id}:`, error);
+    console.error(`Error forgetting network ${(await params).id}:`, error);
     return NextResponse.json(
       { error: "Failed to forget network" },
       { status: 500 }

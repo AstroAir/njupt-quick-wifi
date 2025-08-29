@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react"
 import { apiClient } from "@/lib/api-client"
-import { type WiFiNetwork, ConnectionStatus, type NetworkSettings } from "@/lib/types"
+import { type WiFiNetwork, ConnectionStatus, type NetworkSettings } from "@/types"
 import { logger } from "@/lib/logger"
 
 /**
@@ -46,6 +46,28 @@ export function useWifiApi() {
     }
   }, [connectionStatus, currentNetwork])
 
+  // Fetch connection status
+  const fetchConnectionStatus = useCallback(async () => {
+    if (isOffline) {
+      logger.warn("Device is offline, skipping connection status fetch")
+      return
+    }
+
+    try {
+      const status = await apiClient.getConnectionStatus()
+      setConnectionStatus(status.connectionStatus)
+      setCurrentNetwork(status.currentNetwork)
+      setConnectionError(status.connectionError)
+      setIpAddress(status.ipAddress)
+      setSignalStrength(status.signalStrength)
+      setConnectionDuration(status.connectionDuration)
+      setRetryCount(status.retryCount)
+      setRetryAvailable(status.retryAvailable)
+    } catch (err) {
+      logger.error("Failed to fetch connection status", err)
+    }
+  }, [isOffline])
+
   // Monitor online/offline status
   useEffect(() => {
     const handleOnline = () => {
@@ -71,7 +93,7 @@ export function useWifiApi() {
         window.removeEventListener("offline", handleOffline)
       }
     }
-  }, [])
+  }, [fetchConnectionStatus])
 
   // Fetch networks
   const fetchNetworks = useCallback(async () => {
@@ -89,28 +111,6 @@ export function useWifiApi() {
       setError(err instanceof Error ? err.message : "Failed to fetch networks")
     } finally {
       setIsLoading(false)
-    }
-  }, [isOffline])
-
-  // Fetch connection status
-  const fetchConnectionStatus = useCallback(async () => {
-    if (isOffline) {
-      logger.warn("Device is offline, skipping connection status fetch")
-      return
-    }
-
-    try {
-      const status = await apiClient.getConnectionStatus()
-      setConnectionStatus(status.connectionStatus)
-      setCurrentNetwork(status.currentNetwork)
-      setConnectionError(status.connectionError)
-      setIpAddress(status.ipAddress)
-      setSignalStrength(status.signalStrength)
-      setConnectionDuration(status.connectionDuration)
-      setRetryCount(status.retryCount)
-      setRetryAvailable(status.retryAvailable)
-    } catch (err) {
-      logger.error("Failed to fetch connection status", err)
     }
   }, [isOffline])
 
@@ -320,22 +320,33 @@ export function useWifiApi() {
   // Set up WebSocket for real-time updates
   useEffect(() => {
     const cleanup = apiClient.setupWebSocket({
-      onScanUpdate: (data) => {
-        setIsScanning(data.isScanning)
-        setScanProgress(data.progress || 0)
-        if (!data.isScanning) {
+      onScanUpdate: (data: unknown) => {
+        const scanData = data as { isScanning: boolean; progress?: number }
+        setIsScanning(scanData.isScanning)
+        setScanProgress(scanData.progress || 0)
+        if (!scanData.isScanning) {
           fetchNetworks() // Refresh networks when scan completes
         }
       },
-      onConnectionUpdate: (data) => {
-        setConnectionStatus(data.connectionStatus)
-        setCurrentNetwork(data.currentNetwork)
-        setConnectionError(data.connectionError)
-        setIpAddress(data.ipAddress)
-        setSignalStrength(data.signalStrength)
-        setConnectionDuration(data.connectionDuration)
-        setRetryCount(data.retryCount)
-        setRetryAvailable(data.retryAvailable)
+      onConnectionUpdate: (data: unknown) => {
+        const connectionData = data as {
+          connectionStatus: ConnectionStatus;
+          currentNetwork?: WiFiNetwork;
+          connectionError?: string;
+          ipAddress?: string;
+          signalStrength?: number;
+          connectionDuration?: number;
+          retryCount?: number;
+          retryAvailable?: boolean;
+        }
+        setConnectionStatus(connectionData.connectionStatus)
+        setCurrentNetwork(connectionData.currentNetwork ?? null)
+        setConnectionError(connectionData.connectionError ?? null)
+        setIpAddress(connectionData.ipAddress ?? null)
+        setSignalStrength(connectionData.signalStrength ?? null)
+        setConnectionDuration(connectionData.connectionDuration ?? null)
+        setRetryCount(connectionData.retryCount ?? 0)
+        setRetryAvailable(connectionData.retryAvailable ?? false)
       },
       onNetworkUpdate: () => {
         fetchNetworks() // Refresh networks when they change

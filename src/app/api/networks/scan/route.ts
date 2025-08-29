@@ -1,6 +1,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { getNetworkManager } from "@/lib/network-manager";
 import { authMiddleware } from "@/lib/auth-middleware";
+import { logger } from "@/lib/logger";
 
 /**
  * POST /api/networks/scan
@@ -28,10 +29,31 @@ export async function POST(req: NextRequest) {
       message: "Network scan started",
     });
   } catch (error) {
-    console.error("Error starting network scan:", error);
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
+    logger.error("Error starting network scan:", { error: errorMessage, stack: error instanceof Error ? error.stack : undefined });
+
+    // Provide more specific error messages based on error type
+    let userMessage = "Failed to start network scan";
+    let statusCode = 500;
+
+    if (errorMessage.includes("WiFi not available") || errorMessage.includes("No WiFi adapter")) {
+      userMessage = "WiFi adapter not available. Please check your WiFi hardware.";
+      statusCode = 503;
+    } else if (errorMessage.includes("permission") || errorMessage.includes("access denied")) {
+      userMessage = "Permission denied. Please run with appropriate privileges to scan networks.";
+      statusCode = 403;
+    } else if (errorMessage.includes("busy") || errorMessage.includes("already scanning")) {
+      userMessage = "WiFi adapter is busy. Please wait for current scan to complete.";
+      statusCode = 409;
+    }
+
     return NextResponse.json(
-      { error: "Failed to start network scan" },
-      { status: 500 }
+      {
+        error: userMessage,
+        code: "SCAN_START_ERROR",
+        timestamp: Date.now()
+      },
+      { status: statusCode }
     );
   }
 }

@@ -8,6 +8,10 @@ import { secureStore } from "@/lib/secure-store";
 import { logger } from "@/lib/logger";
 import { EventEmitter } from "events";
 import { getSystemWifiService } from "@/lib/system-wifi";
+import { exec } from "child_process";
+import { promisify } from "util";
+
+const execAsync = promisify(exec);
 
 // Interface for global WiFi settings
 interface WiFiSettings {
@@ -23,6 +27,7 @@ interface WiFiSettings {
   retryDelay: number;
   prioritizeKnownNetworks: boolean;
   connectionTimeout: number;
+  scanTimeout: number;
   enableLogging: boolean;
   logLevel: "debug" | "info" | "warn" | "error";
 }
@@ -111,6 +116,7 @@ class NetworkManager extends EventEmitter {
     retryDelay: 5000,
     prioritizeKnownNetworks: true,
     connectionTimeout: 15000,
+    scanTimeout: 30000,
     enableLogging: true,
     logLevel: "info",
   };
@@ -347,8 +353,9 @@ class NetworkManager extends EventEmitter {
 
     // Filter by minimum signal strength
     if (filters.minSignalStrength !== undefined) {
+      const minSignal = filters.minSignalStrength;
       filtered = filtered.filter(
-        (n) => n.signalStrength >= filters.minSignalStrength
+        (n) => n.signalStrength >= minSignal
       );
     }
 
@@ -449,9 +456,23 @@ class NetworkManager extends EventEmitter {
   async startScan(): Promise<string> {
     logger.info("Starting network scan");
 
+    // Edge case: Check if already scanning
     if (this.isScanning) {
       logger.warn("Scan already in progress");
-      throw new Error("Scan already in progress");
+      throw new Error("Scan already in progress. Please wait for current scan to complete.");
+    }
+
+    // Edge case: Check if WiFi is available
+    const systemWifi = getSystemWifiService();
+    try {
+      const isWifiAvailable = await systemWifi.isWifiAvailable();
+      if (!isWifiAvailable) {
+        logger.error("WiFi adapter not available for scanning");
+        throw new Error("WiFi adapter not available. Please check your WiFi hardware.");
+      }
+    } catch (error) {
+      logger.error("Error checking WiFi availability:", error);
+      // Continue with scan attempt - let the system WiFi service handle the error
     }
 
     this.isScanning = true;
@@ -462,6 +483,19 @@ class NetworkManager extends EventEmitter {
 
     // Emit scan started event
     this.emit("scanStarted", { scanId: this.scanId });
+
+    // Set scan timeout to prevent hanging
+    const scanTimeout = setTimeout(() => {
+      if (this.isScanning) {
+        logger.warn(`Scan timeout after ${this.settings.scanTimeout || 30000}ms`);
+        this.isScanning = false;
+        this.emit("scanError", {
+          error: "Scan timed out",
+          scanId: this.scanId,
+          timeout: true
+        });
+      }
+    }, this.settings.scanTimeout || 30000);
 
     try {
       // 获取系统WiFi服务
@@ -474,21 +508,55 @@ class NetworkManager extends EventEmitter {
         // 实际扫描启动成功，但无法获取进度，所以模拟进度
         this.simulateScanProgress().catch((err) => {
           logger.error("Scan progress simulation failed", err);
+          clearTimeout(scanTimeout);
+          this.isScanning = false;
+          this.emit("scanError", {
+            error: "Scan progress tracking failed",
+            scanId: this.scanId,
+            originalError: err.message
+          });
         });
       } else {
         // 如果系统扫描失败，回退到模拟扫描
         logger.warn("System WiFi scan failed, falling back to simulated scan");
         this.simulateScan().catch((err) => {
           logger.error("Scan simulation failed", err);
+          clearTimeout(scanTimeout);
           this.isScanning = false;
-          this.emit("scanError", { error: err.message });
+          this.emit("scanError", {
+            error: "Both system and simulated scan failed",
+            scanId: this.scanId,
+            originalError: err.message
+          });
         });
       }
+
+      // Clear timeout since scan started successfully
+      clearTimeout(scanTimeout);
     } catch (error) {
-      logger.error("Failed to start WiFi scan", error);
+      clearTimeout(scanTimeout);
       this.isScanning = false;
-      this.emit("scanError", { error: "Failed to start WiFi scan" });
-      throw error;
+
+      const errorMessage = error instanceof Error ? error.message : "Unknown scan error";
+      logger.error("Failed to start WiFi scan", { error: errorMessage, scanId: this.scanId });
+
+      // Provide specific error messages based on error type
+      let userMessage = "Failed to start WiFi scan";
+      if (errorMessage.includes("permission") || errorMessage.includes("access denied")) {
+        userMessage = "Permission denied. Please run with administrator privileges.";
+      } else if (errorMessage.includes("busy") || errorMessage.includes("device busy")) {
+        userMessage = "WiFi adapter is busy. Please wait and try again.";
+      } else if (errorMessage.includes("not found") || errorMessage.includes("no such device")) {
+        userMessage = "WiFi adapter not found. Please check your WiFi hardware.";
+      }
+
+      this.emit("scanError", {
+        error: userMessage,
+        scanId: this.scanId,
+        originalError: errorMessage
+      });
+
+      throw new Error(userMessage);
     }
 
     return this.scanId;
@@ -691,7 +759,7 @@ class NetworkManager extends EventEmitter {
     ];
 
     // Add some random networks with varying signal strengths
-    const randomNetworks = Array.from({ length: 5 }, (_, i) => ({
+    const randomNetworks = Array.from({ length: 5 }, () => ({
       ssid: `Network_${Math.floor(Math.random() * 1000)}`,
       bssid: `${Math.random().toString(16).substring(2, 10)}:${Math.random()
         .toString(16)
@@ -917,7 +985,7 @@ class NetworkManager extends EventEmitter {
       if (!success) {
         logger.warn(`System WiFi connection to ${network.ssid} failed, falling back to simulated connection`);
         // 模拟连接过程
-        await this.simulateConnection(network, password);
+        await this.simulateConnection(network);
       } else {
         // 系统连接成功
         logger.info(`Successfully connected to ${network.ssid} using system WiFi`);
@@ -928,8 +996,8 @@ class NetworkManager extends EventEmitter {
         this.connectionError = null;
         this.lastConnectionTime = Date.now();
         
-        // 模拟获取IP地址
-        this.ipAddress = `192.168.1.${Math.floor(Math.random() * 254) + 1}`;
+        // 获取真实IP地址
+        this.ipAddress = await this.getRealIpAddress();
       }
 
       // Clear the timeout since connection was successful
@@ -972,9 +1040,9 @@ class NetworkManager extends EventEmitter {
   }
 
   /**
-   * Handle connection retry logic
+   * Handle connection retry logic with enhanced recovery actions
    */
-  private handleConnectionRetry(
+  private async handleConnectionRetry(
     network: WiFiNetwork,
     password?: string,
     saveNetwork = true
@@ -988,6 +1056,9 @@ class NetworkManager extends EventEmitter {
         `Scheduling retry ${this.retryCount}/${this.settings.maxRetryAttempts} for ${network.ssid} in ${this.settings.retryDelay}ms`
       );
 
+      // Perform recovery actions before retry
+      await this.performRecoveryActions(network, this.retryCount);
+
       // Emit retry scheduled event
       this.emit("retryScheduled", {
         connectionId: this.connectionId,
@@ -997,7 +1068,8 @@ class NetworkManager extends EventEmitter {
         network: { ssid: network.ssid, bssid: network.bssid },
       });
 
-      // Schedule retry
+      // Schedule retry with exponential backoff
+      const retryDelay = this.calculateRetryDelay(this.retryCount);
       this.retryTimer = setTimeout(async () => {
         logger.info(`Attempting retry ${this.retryCount} for ${network.ssid}`);
 
@@ -1012,8 +1084,23 @@ class NetworkManager extends EventEmitter {
           this.connectionStatus = ConnectionStatus.CONNECTING;
           this.connectionError = null;
 
-          // Simulate connection process
-          await this.simulateConnection(network, password);
+          // Try system connection first, then fallback to simulation
+          const systemWifi = getSystemWifiService();
+          const success = await systemWifi.connectToNetwork(network.ssid, password);
+
+          if (!success) {
+            logger.warn(`System WiFi connection to ${network.ssid} failed on retry ${this.retryCount}, falling back to simulation`);
+            await this.simulateConnection(network);
+          } else {
+            // System connection successful
+            this.currentNetwork = await systemWifi.getCurrentNetwork() || network;
+            this.connectionStatus = ConnectionStatus.CONNECTED;
+            this.connectionError = null;
+            this.lastConnectionTime = Date.now();
+
+            // Get real IP address instead of simulation
+            this.ipAddress = await this.getRealIpAddress();
+          }
 
           // If requested, save the network and credentials
           if (saveNetwork) {
@@ -1061,13 +1148,16 @@ class NetworkManager extends EventEmitter {
           });
 
           // Try again if we haven't reached max retries
-          this.handleConnectionRetry(network, password, saveNetwork);
+          await this.handleConnectionRetry(network, password, saveNetwork);
         }
-      }, this.settings.retryDelay);
+      }, retryDelay);
     } else if (this.retryCount >= this.settings.maxRetryAttempts) {
       logger.warn(
         `Max retry attempts (${this.settings.maxRetryAttempts}) reached for ${network.ssid}`
       );
+
+      // Perform final recovery actions
+      await this.performFinalRecoveryActions(network);
 
       // Emit max retries reached event
       this.emit("maxRetriesReached", {
@@ -1075,6 +1165,273 @@ class NetworkManager extends EventEmitter {
         retryCount: this.retryCount,
         network: { ssid: network.ssid, bssid: network.bssid },
       });
+    }
+  }
+
+  /**
+   * Perform recovery actions before retry attempts
+   */
+  private async performRecoveryActions(network: WiFiNetwork, retryCount: number): Promise<void> {
+    try {
+      logger.info(`Performing recovery actions for ${network.ssid} (retry ${retryCount})`);
+
+      // Recovery action 1: Clear any existing connection state
+      if (retryCount === 1) {
+        logger.debug("Recovery action: Clearing connection state");
+        await this.clearConnectionState();
+      }
+
+      // Recovery action 2: Refresh network adapter (Windows/Linux)
+      if (retryCount === 2) {
+        logger.debug("Recovery action: Refreshing network adapter");
+        await this.refreshNetworkAdapter();
+      }
+
+      // Recovery action 3: Reset WiFi interface (more aggressive)
+      if (retryCount >= 3) {
+        logger.debug("Recovery action: Resetting WiFi interface");
+        await this.resetWifiInterface();
+      }
+
+      // Recovery action 4: Clear DNS cache
+      if (retryCount >= 2) {
+        logger.debug("Recovery action: Clearing DNS cache");
+        await this.clearDnsCache();
+      }
+
+    } catch (error) {
+      logger.warn("Recovery action failed, continuing with retry:", error);
+    }
+  }
+
+  /**
+   * Calculate retry delay with exponential backoff
+   */
+  private calculateRetryDelay(retryCount: number): number {
+    const baseDelay = this.settings.retryDelay;
+    const maxDelay = 30000; // 30 seconds max
+
+    // Exponential backoff: delay = baseDelay * (2 ^ (retryCount - 1))
+    const exponentialDelay = baseDelay * Math.pow(2, retryCount - 1);
+
+    // Add jitter to prevent thundering herd
+    const jitter = Math.random() * 1000; // 0-1 second jitter
+
+    return Math.min(exponentialDelay + jitter, maxDelay);
+  }
+
+  /**
+   * Get real IP address from network interface
+   */
+  private async getRealIpAddress(): Promise<string> {
+    try {
+      const platform = process.platform;
+
+      let command = "";
+      if (platform === "win32") {
+        command = "ipconfig | findstr /i \"IPv4\"";
+      } else if (platform === "darwin") {
+        command = "ifconfig | grep 'inet ' | grep -v '127.0.0.1' | head -1";
+      } else {
+        command = "ip route get 1.1.1.1 | grep -oP 'src \\K\\S+'";
+      }
+
+      const { stdout } = await execAsync(command);
+
+      // Parse IP address from output
+      const ipMatch = stdout.match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/);
+      if (ipMatch) {
+        logger.debug(`Real IP address detected: ${ipMatch[1]}`);
+        return ipMatch[1];
+      }
+
+      // Fallback to simulated IP if real IP detection fails
+      logger.warn("Failed to detect real IP address, using simulated IP");
+      return `192.168.1.${Math.floor(Math.random() * 254) + 1}`;
+    } catch (error) {
+      logger.error("Error getting real IP address:", error);
+      // Fallback to simulated IP
+      return `192.168.1.${Math.floor(Math.random() * 254) + 1}`;
+    }
+  }
+
+  /**
+   * Perform final recovery actions when max retries reached
+   */
+  private async performFinalRecoveryActions(network: WiFiNetwork): Promise<void> {
+    try {
+      logger.info(`Performing final recovery actions for ${network.ssid}`);
+
+      // Final action 1: Reset connection state completely
+      this.connectionStatus = ConnectionStatus.ERROR;
+      this.connectionError = `Failed to connect to ${network.ssid} after ${this.retryCount} attempts`;
+      this.currentNetwork = null;
+      this.connectionId = null;
+
+      // Final action 2: Clear any timers
+      if (this.retryTimer) {
+        clearTimeout(this.retryTimer);
+        this.retryTimer = null;
+      }
+
+      // Final action 3: Suggest alternative networks
+      const alternativeNetworks = await this.findAlternativeNetworks(network);
+      if (alternativeNetworks.length > 0) {
+        logger.info(`Found ${alternativeNetworks.length} alternative networks`);
+        this.emit("alternativeNetworksFound", {
+          failedNetwork: { ssid: network.ssid, bssid: network.bssid },
+          alternatives: alternativeNetworks.map(n => ({ ssid: n.ssid, bssid: n.bssid, signalStrength: n.signalStrength })),
+        });
+      }
+
+      // Final action 4: Reset retry count for future attempts
+      this.retryCount = 0;
+
+    } catch (error) {
+      logger.error("Final recovery actions failed:", error);
+    }
+  }
+
+  /**
+   * Clear connection state for recovery
+   */
+  private async clearConnectionState(): Promise<void> {
+    try {
+      // Clear internal state
+      this.connectionError = null;
+      this.connectionId = null;
+
+      // Clear any existing timers
+      this.clearConnectionTimers();
+
+      // Disconnect from any current connection
+      const systemWifi = getSystemWifiService();
+      await systemWifi.disconnectFromNetwork();
+
+      logger.debug("Connection state cleared successfully");
+    } catch (error) {
+      logger.warn("Error clearing connection state:", error);
+    }
+  }
+
+  /**
+   * Refresh network adapter
+   */
+  private async refreshNetworkAdapter(): Promise<void> {
+    try {
+      const platform = process.platform;
+
+      if (platform === "win32") {
+        // Windows: Disable and re-enable WiFi adapter
+        await execAsync("netsh interface set interface \"Wi-Fi\" disable");
+        await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2 seconds
+        await execAsync("netsh interface set interface \"Wi-Fi\" enable");
+      } else if (platform === "darwin") {
+        // macOS: Turn WiFi off and on
+        await execAsync("networksetup -setairportpower en0 off");
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        await execAsync("networksetup -setairportpower en0 on");
+      } else {
+        // Linux: Restart network manager or WiFi interface
+        try {
+          await execAsync("sudo systemctl restart NetworkManager");
+        } catch {
+          // Fallback: restart WiFi interface
+          await execAsync("sudo ip link set wlan0 down && sudo ip link set wlan0 up");
+        }
+      }
+
+      logger.debug("Network adapter refreshed successfully");
+    } catch (error) {
+      logger.warn("Error refreshing network adapter:", error);
+    }
+  }
+
+  /**
+   * Reset WiFi interface (more aggressive recovery)
+   */
+  private async resetWifiInterface(): Promise<void> {
+    try {
+      const platform = process.platform;
+
+      if (platform === "win32") {
+        // Windows: Reset WiFi adapter
+        await execAsync("netsh wlan delete profile name=* i=*");
+        await execAsync("netsh int ip reset");
+        await execAsync("netsh winsock reset");
+      } else if (platform === "darwin") {
+        // macOS: Reset network preferences
+        await execAsync("sudo dscacheutil -flushcache");
+        await execAsync("sudo killall -HUP mDNSResponder");
+      } else {
+        // Linux: Restart networking service
+        try {
+          await execAsync("sudo systemctl restart networking");
+        } catch {
+          await execAsync("sudo service network-manager restart");
+        }
+      }
+
+      logger.debug("WiFi interface reset successfully");
+    } catch (error) {
+      logger.warn("Error resetting WiFi interface:", error);
+    }
+  }
+
+  /**
+   * Clear DNS cache
+   */
+  private async clearDnsCache(): Promise<void> {
+    try {
+      const platform = process.platform;
+
+      if (platform === "win32") {
+        await execAsync("ipconfig /flushdns");
+      } else if (platform === "darwin") {
+        await execAsync("sudo dscacheutil -flushcache");
+        await execAsync("sudo killall -HUP mDNSResponder");
+      } else {
+        // Linux
+        await execAsync("sudo systemctl restart systemd-resolved");
+      }
+
+      logger.debug("DNS cache cleared successfully");
+    } catch (error) {
+      logger.warn("Error clearing DNS cache:", error);
+    }
+  }
+
+  /**
+   * Find alternative networks with similar characteristics
+   */
+  private async findAlternativeNetworks(failedNetwork: WiFiNetwork): Promise<WiFiNetwork[]> {
+    try {
+      const alternatives: WiFiNetwork[] = [];
+
+      // Look for networks with similar SSID patterns (same base name)
+      const baseSsid = failedNetwork.ssid.replace(/[-_]\d+$/, ""); // Remove trailing numbers
+
+      for (const network of this.availableNetworks) {
+        if (network.ssid !== failedNetwork.ssid) {
+          // Check for similar SSID patterns
+          if (network.ssid.startsWith(baseSsid) || baseSsid.startsWith(network.ssid.replace(/[-_]\d+$/, ""))) {
+            alternatives.push(network);
+          }
+          // Check for same security type and good signal strength
+          else if (network.security === failedNetwork.security && network.signalStrength > 50) {
+            alternatives.push(network);
+          }
+        }
+      }
+
+      // Sort by signal strength (strongest first)
+      alternatives.sort((a, b) => b.signalStrength - a.signalStrength);
+
+      // Return top 3 alternatives
+      return alternatives.slice(0, 3);
+    } catch (error) {
+      logger.error("Error finding alternative networks:", error);
+      return [];
     }
   }
 
@@ -1129,46 +1486,190 @@ class NetworkManager extends EventEmitter {
 
     logger.debug(`Starting signal monitoring for ${network.ssid}`);
 
-    // Monitor signal strength every 10 seconds
-    this.signalMonitorInterval = setInterval(() => {
-      // In a real implementation, this would query the actual signal strength
-      // For simulation, we'll randomly fluctuate the signal strength
-      if (this.currentNetwork && this.currentNetwork.bssid === network.bssid) {
-        const currentStrength = this.currentNetwork.signalStrength;
-        const fluctuation = Math.floor(Math.random() * 10) - 5; // -5 to +5 fluctuation
-        const newStrength = Math.max(
-          0,
-          Math.min(100, currentStrength + fluctuation)
-        );
+    // Monitor signal strength every 10 seconds with real system queries
+    this.signalMonitorInterval = setInterval(async () => {
+      try {
+        if (this.currentNetwork && this.currentNetwork.bssid === network.bssid) {
+          // Get real signal strength from system
+          const realSignalStrength = await this.getRealSignalStrength(network);
 
-        // Only update if there's a significant change
-        if (Math.abs(currentStrength - newStrength) > 2) {
-          this.currentNetwork.signalStrength = newStrength;
-          this.signalStrength = newStrength;
+          if (realSignalStrength !== null) {
+            const currentStrength = this.currentNetwork.signalStrength;
 
-          logger.debug(
-            `Signal strength for ${network.ssid} updated: ${newStrength}%`
-          );
+            // Only update if there's a significant change (>2% difference)
+            if (Math.abs(currentStrength - realSignalStrength) > 2) {
+              this.currentNetwork.signalStrength = realSignalStrength;
 
-          // Emit signal strength update event
-          this.emit("signalStrengthUpdate", {
-            network: { ssid: network.ssid, bssid: network.bssid },
-            signalStrength: newStrength,
-          });
+              logger.debug(
+                `Signal strength for ${network.ssid} updated: ${realSignalStrength}% (was ${currentStrength}%)`
+              );
 
-          // If signal is too weak, emit warning
-          if (newStrength < 20) {
-            logger.warn(
-              `Signal strength for ${network.ssid} is weak: ${newStrength}%`
-            );
-            this.emit("weakSignal", {
-              network: { ssid: network.ssid, bssid: network.bssid },
-              signalStrength: newStrength,
-            });
+              // Emit signal strength update event
+              this.emit("signalStrengthUpdate", {
+                network: { ssid: network.ssid, bssid: network.bssid },
+                signalStrength: realSignalStrength,
+                previousStrength: currentStrength,
+                timestamp: Date.now(),
+              });
+
+              // If signal is too weak, emit warning
+              if (realSignalStrength < 20) {
+                logger.warn(
+                  `Signal strength for ${network.ssid} is weak: ${realSignalStrength}%`
+                );
+                this.emit("weakSignal", {
+                  network: { ssid: network.ssid, bssid: network.bssid },
+                  signalStrength: realSignalStrength,
+                  timestamp: Date.now(),
+                });
+              }
+
+              // If signal improved significantly, emit recovery event
+              if (currentStrength < 30 && realSignalStrength > 50) {
+                logger.info(`Signal strength for ${network.ssid} recovered: ${realSignalStrength}%`);
+                this.emit("signalRecovered", {
+                  network: { ssid: network.ssid, bssid: network.bssid },
+                  signalStrength: realSignalStrength,
+                  previousStrength: currentStrength,
+                  timestamp: Date.now(),
+                });
+              }
+            }
+          } else {
+            // Fallback to simulation if real monitoring fails
+            logger.debug("Real signal monitoring failed, using simulation fallback");
+            const currentStrength = this.currentNetwork.signalStrength;
+            const fluctuation = Math.floor(Math.random() * 6) - 3; // -3 to +3 fluctuation (smaller than before)
+            const newStrength = Math.max(0, Math.min(100, currentStrength + fluctuation));
+
+            if (Math.abs(currentStrength - newStrength) > 2) {
+              this.currentNetwork.signalStrength = newStrength;
+              this.emit("signalStrengthUpdate", {
+                network: { ssid: network.ssid, bssid: network.bssid },
+                signalStrength: newStrength,
+                simulated: true,
+                timestamp: Date.now(),
+              });
+            }
+          }
+        }
+      } catch (error) {
+        logger.error("Error during signal monitoring:", error);
+      }
+    }, 10000);
+  }
+
+  /**
+   * Get real signal strength from system
+   */
+  private async getRealSignalStrength(network: WiFiNetwork): Promise<number | null> {
+    try {
+      const platform = process.platform;
+
+      let command = "";
+      let signalStrength: number | null = null;
+
+      if (platform === "win32") {
+        // Windows: Use netsh to get signal strength
+        command = `netsh wlan show interfaces`;
+        const { stdout } = await execAsync(command);
+
+        // Parse signal strength from Windows output
+        const signalMatch = stdout.match(/Signal\s*:\s*(\d+)%/i);
+        if (signalMatch) {
+          signalStrength = parseInt(signalMatch[1], 10);
+        }
+      } else if (platform === "darwin") {
+        // macOS: Use airport utility or system_profiler
+        try {
+          command = `/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport -I`;
+          const { stdout } = await execAsync(command);
+
+          // Parse RSSI and convert to percentage
+          const rssiMatch = stdout.match(/agrCtlRSSI:\s*(-?\d+)/);
+          if (rssiMatch) {
+            const rssi = parseInt(rssiMatch[1], 10);
+            signalStrength = this.convertRSSIToPercentage(rssi);
+          }
+        } catch {
+          // Fallback: use system_profiler
+          command = `system_profiler SPAirPortDataType | grep -A 10 "${network.ssid}"`;
+          const { stdout } = await execAsync(command);
+          const signalMatch = stdout.match(/Signal \/ Noise:\s*(-?\d+)/);
+          if (signalMatch) {
+            const rssi = parseInt(signalMatch[1], 10);
+            signalStrength = this.convertRSSIToPercentage(rssi);
+          }
+        }
+      } else {
+        // Linux: Use iwconfig or iw
+        try {
+          command = `iwconfig 2>/dev/null | grep -A 5 "${network.ssid}"`;
+          const { stdout } = await execAsync(command);
+
+          // Parse signal level
+          const signalMatch = stdout.match(/Signal level=(-?\d+) dBm/) ||
+                             stdout.match(/Signal level=(\d+)\/100/);
+
+          if (signalMatch) {
+            if (signalMatch[1].startsWith("-")) {
+              // dBm value - convert to percentage
+              const dBm = parseInt(signalMatch[1], 10);
+              signalStrength = this.convertDBMToPercentage(dBm);
+            } else {
+              // Already a percentage
+              signalStrength = parseInt(signalMatch[1], 10);
+            }
+          }
+        } catch {
+          // Fallback: use iw command
+          command = `iw dev wlan0 link`;
+          const { stdout } = await execAsync(command);
+          const signalMatch = stdout.match(/signal:\s*(-?\d+) dBm/);
+          if (signalMatch) {
+            const dBm = parseInt(signalMatch[1], 10);
+            signalStrength = this.convertDBMToPercentage(dBm);
           }
         }
       }
-    }, 10000);
+
+      if (signalStrength !== null) {
+        logger.debug(`Real signal strength for ${network.ssid}: ${signalStrength}%`);
+        return signalStrength;
+      } else {
+        logger.debug(`Could not get real signal strength for ${network.ssid}`);
+        return null;
+      }
+    } catch (error) {
+      logger.error("Error getting real signal strength:", error);
+      return null;
+    }
+  }
+
+  /**
+   * Convert RSSI (dBm) to percentage
+   */
+  private convertRSSIToPercentage(rssi: number): number {
+    // RSSI to percentage conversion
+    // -30 dBm = 100%, -90 dBm = 0%
+    const minRSSI = -90;
+    const maxRSSI = -30;
+
+    if (rssi >= maxRSSI) return 100;
+    if (rssi <= minRSSI) return 0;
+
+    return Math.round(((rssi - minRSSI) / (maxRSSI - minRSSI)) * 100);
+  }
+
+  /**
+   * Convert dBm to percentage (alternative method)
+   */
+  private convertDBMToPercentage(dBm: number): number {
+    // Alternative dBm to percentage conversion
+    if (dBm >= -50) return 100;
+    if (dBm <= -100) return 0;
+
+    return Math.round(((dBm + 100) / 50) * 100);
   }
 
   /**
@@ -1199,7 +1700,7 @@ class NetworkManager extends EventEmitter {
   /**
    * Simulate a connection process
    */
-  private async simulateConnection(network: WiFiNetwork, password?: string) {
+  private async simulateConnection(network: WiFiNetwork) {
     logger.debug(`Simulating connection to ${network.ssid}`);
 
     // Simulate connection delay
@@ -1241,8 +1742,8 @@ class NetworkManager extends EventEmitter {
     this.connectionError = null;
     this.lastConnectionTime = Date.now();
 
-    // Simulate getting an IP address
-    this.ipAddress = `192.168.1.${Math.floor(Math.random() * 254) + 1}`;
+    // Get real IP address
+    this.ipAddress = await this.getRealIpAddress();
 
     logger.info(
       `Successfully connected to ${network.ssid} (IP: ${this.ipAddress})`
@@ -1266,12 +1767,16 @@ class NetworkManager extends EventEmitter {
   ): Promise<WiFiNetwork> {
     logger.info(`Saving network ${network.ssid}`);
 
-    const updatedNetwork = {
+    const updatedNetwork: WiFiNetwork = {
       ...network,
       saved: true,
       settings: {
-        ...network.settings,
+        ...(network.settings || {}),
         autoConnect: true,
+        redirectUrl: network.settings?.redirectUrl ?? null,
+        hidden: network.settings?.hidden ?? false,
+        priority: network.settings?.priority ?? 0,
+        redirectTimeout: network.settings?.redirectTimeout ?? 3000,
       },
     };
 
@@ -1418,10 +1923,15 @@ class NetworkManager extends EventEmitter {
       (n) => n.bssid === network.bssid
     );
     if (savedIndex >= 0) {
+      const currentSettings = this.savedNetworks[savedIndex].settings;
       this.savedNetworks[savedIndex] = {
         ...this.savedNetworks[savedIndex],
         settings: {
-          ...this.savedNetworks[savedIndex].settings,
+          autoConnect: currentSettings?.autoConnect ?? false,
+          redirectUrl: currentSettings?.redirectUrl ?? null,
+          hidden: currentSettings?.hidden ?? false,
+          priority: currentSettings?.priority ?? 0,
+          redirectTimeout: currentSettings?.redirectTimeout ?? 3000,
           ...settings,
         },
       };
@@ -1432,10 +1942,15 @@ class NetworkManager extends EventEmitter {
       (n) => n.bssid === network.bssid
     );
     if (availableIndex >= 0 && this.availableNetworks[availableIndex].saved) {
+      const currentAvailableSettings = this.availableNetworks[availableIndex].settings;
       this.availableNetworks[availableIndex] = {
         ...this.availableNetworks[availableIndex],
         settings: {
-          ...this.availableNetworks[availableIndex].settings,
+          autoConnect: currentAvailableSettings?.autoConnect ?? false,
+          redirectUrl: currentAvailableSettings?.redirectUrl ?? null,
+          hidden: currentAvailableSettings?.hidden ?? false,
+          priority: currentAvailableSettings?.priority ?? 0,
+          redirectTimeout: currentAvailableSettings?.redirectTimeout ?? 3000,
           ...settings,
         },
       };

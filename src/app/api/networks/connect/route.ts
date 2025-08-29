@@ -2,6 +2,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { getNetworkManager } from "@/lib/network-manager";
 import { authMiddleware } from "@/lib/auth-middleware";
 import { SecurityType } from "@/types";
+import { validateConnectionRequest, sanitizeForSystemCommand } from "@/lib/input-validator";
 
 /**
  * POST /api/networks/connect
@@ -19,9 +20,27 @@ export async function POST(req: NextRequest) {
     }
 
     const body = await req.json();
+
+    // Comprehensive input validation
+    const validationResult = validateConnectionRequest(body);
+    if (!validationResult.isValid) {
+      return NextResponse.json(
+        {
+          error: "Invalid request data",
+          details: validationResult.errors
+        },
+        { status: 400 }
+      );
+    }
+
     const { bssid, ssid, password, saveNetwork = true } = body;
 
-    if (!bssid && !ssid) {
+    // Sanitize inputs for safe system command usage
+    const sanitizedSSID = ssid ? sanitizeForSystemCommand(ssid) : null;
+    const sanitizedBSSID = bssid ? sanitizeForSystemCommand(bssid) : null;
+    const sanitizedPassword = password ? password : null; // Don't sanitize passwords, just validate
+
+    if (!sanitizedBSSID && !sanitizedSSID) {
       return NextResponse.json(
         { error: "Either BSSID or SSID is required" },
         { status: 400 }
@@ -30,12 +49,12 @@ export async function POST(req: NextRequest) {
 
     const networkManager = getNetworkManager();
 
-    // Get the network details
+    // Get the network details using sanitized inputs
     let network = null;
-    if (bssid) {
-      network = await networkManager.getNetworkByBssid(bssid);
-    } else if (ssid) {
-      network = await networkManager.getNetworkBySsid(ssid);
+    if (sanitizedBSSID) {
+      network = await networkManager.getNetworkByBssid(sanitizedBSSID);
+    } else if (sanitizedSSID) {
+      network = await networkManager.getNetworkBySsid(sanitizedSSID);
     }
 
     if (!network) {
@@ -60,10 +79,10 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Start connection process
+    // Start connection process with sanitized inputs
     const connectionId = await networkManager.connectToNetwork(
       network,
-      password,
+      sanitizedPassword,
       saveNetwork
     );
 

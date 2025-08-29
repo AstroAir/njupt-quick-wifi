@@ -2,6 +2,8 @@ import { type NextRequest, NextResponse } from "next/server";
 import { SecurityType, NetworkType, type WiFiNetwork } from "@/types";
 import { getNetworkManager } from "@/lib/network-manager";
 import { authMiddleware } from "@/lib/auth-middleware";
+import { validateSSID, validateWiFiPassword, sanitizeForSystemCommand } from "@/lib/input-validator";
+import { logger } from "@/lib/logger";
 
 /**
  * GET /api/networks
@@ -23,10 +25,31 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json({ networks });
   } catch (error) {
-    console.error("Error fetching networks:", error);
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
+    logger.error("Error fetching networks:", { error: errorMessage, stack: error instanceof Error ? error.stack : undefined });
+
+    // Provide more specific error messages based on error type
+    let userMessage = "Failed to fetch networks";
+    let statusCode = 500;
+
+    if (errorMessage.includes("WiFi not available") || errorMessage.includes("No WiFi adapter")) {
+      userMessage = "WiFi adapter not available. Please check your WiFi hardware.";
+      statusCode = 503;
+    } else if (errorMessage.includes("permission") || errorMessage.includes("access denied")) {
+      userMessage = "Permission denied. Please run with appropriate privileges.";
+      statusCode = 403;
+    } else if (errorMessage.includes("timeout")) {
+      userMessage = "Network scan timed out. Please try again.";
+      statusCode = 408;
+    }
+
     return NextResponse.json(
-      { error: "Failed to fetch networks" },
-      { status: 500 }
+      {
+        error: userMessage,
+        code: "NETWORK_FETCH_ERROR",
+        timestamp: Date.now()
+      },
+      { status: statusCode }
     );
   }
 }
@@ -49,8 +72,21 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const { ssid, security, password } = body;
 
+    // Comprehensive input validation
     if (!ssid) {
       return NextResponse.json({ error: "SSID is required" }, { status: 400 });
+    }
+
+    // Validate SSID
+    const ssidValidation = validateSSID(ssid);
+    if (!ssidValidation.isValid) {
+      return NextResponse.json(
+        {
+          error: "Invalid SSID",
+          details: ssidValidation.errors
+        },
+        { status: 400 }
+      );
     }
 
     // Validate security type
@@ -60,6 +96,26 @@ export async function POST(req: NextRequest) {
         { status: 400 }
       );
     }
+
+    // Validate password if provided
+    if (password) {
+      const passwordValidation = validateWiFiPassword(password);
+      if (!passwordValidation.isValid) {
+        return NextResponse.json(
+          {
+            error: "Invalid password",
+            details: passwordValidation.errors
+          },
+          { status: 400 }
+        );
+      }
+    }
+
+    // Sanitize inputs
+    const sanitizedSSID = sanitizeForSystemCommand(ssid);
+
+    // Use sanitized SSID for network operations
+    logger.debug(`Processing network request for SSID: ${sanitizedSSID}`);
 
     // For secured networks, password is required
     if (security !== SecurityType.OPEN && !password) {

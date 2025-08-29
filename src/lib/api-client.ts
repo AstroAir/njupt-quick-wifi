@@ -12,11 +12,11 @@ interface WebSocketCallbacks {
 }
 
 // Define request queue item type
-interface RequestQueueItem<T = unknown> {
+interface RequestQueueItem {
   endpoint: string;
   method: "GET" | "POST" | "PUT" | "DELETE";
   body?: unknown;
-  resolve: (value: T) => void;
+  resolve: (value: unknown) => void;
   reject: (reason: unknown) => void;
 }
 
@@ -119,7 +119,13 @@ class ApiClient extends EventEmitter {
         `Device is offline, queueing request: ${method} ${endpoint}`
       );
       return new Promise<T>((resolve, reject) => {
-        this.requestQueue.push({ endpoint, method, body, resolve, reject });
+        this.requestQueue.push({
+          endpoint,
+          method,
+          body,
+          resolve: resolve as (value: unknown) => void,
+          reject
+        });
       });
     }
 
@@ -165,7 +171,13 @@ class ApiClient extends EventEmitter {
 
         // Queue the request for later
         return new Promise<T>((resolve, reject) => {
-          this.requestQueue.push({ endpoint, method, body, resolve, reject });
+          this.requestQueue.push({
+            endpoint,
+            method,
+            body,
+            resolve: resolve as (value: unknown) => void,
+            reject
+          });
         });
       }
 

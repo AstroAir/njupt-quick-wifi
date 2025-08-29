@@ -471,12 +471,16 @@ export const useWifiStore = create<WifiStore>()(
 
         // If this is a new network, add it to saved networks
         if (!network.saved) {
-          const updatedNetwork = {
+          const updatedNetwork: WiFiNetwork = {
             ...network,
             saved: true,
             settings: {
-              ...network.settings,
+              ...(network.settings || {}),
               autoConnect: true,
+              redirectUrl: network.settings?.redirectUrl ?? null,
+              hidden: network.settings?.hidden ?? false,
+              priority: network.settings?.priority ?? 0,
+              redirectTimeout: network.settings?.redirectTimeout ?? 3000,
             },
           };
 
@@ -548,12 +552,16 @@ export const useWifiStore = create<WifiStore>()(
       },
 
       saveNetwork: (network: WiFiNetwork, autoConnect = true) => {
-        const updatedNetwork = {
+        const updatedNetwork: WiFiNetwork = {
           ...network,
           saved: true,
           settings: {
-            ...network.settings,
+            ...(network.settings || {}),
             autoConnect,
+            redirectUrl: network.settings?.redirectUrl ?? null,
+            hidden: network.settings?.hidden ?? false,
+            priority: network.settings?.priority ?? 0,
+            redirectTimeout: network.settings?.redirectTimeout ?? 3000,
           },
         };
 
@@ -572,12 +580,32 @@ export const useWifiStore = create<WifiStore>()(
         set((state) => ({
           savedNetworks: state.savedNetworks.map((n) =>
             n.bssid === network.bssid
-              ? { ...n, settings: { ...n.settings, ...settings } }
+              ? {
+                  ...n,
+                  settings: {
+                    autoConnect: n.settings?.autoConnect ?? false,
+                    redirectUrl: n.settings?.redirectUrl ?? null,
+                    hidden: n.settings?.hidden ?? false,
+                    priority: n.settings?.priority ?? 0,
+                    redirectTimeout: n.settings?.redirectTimeout ?? 3000,
+                    ...settings
+                  }
+                }
               : n
           ),
           availableNetworks: state.availableNetworks.map((n) =>
             n.bssid === network.bssid && n.saved
-              ? { ...n, settings: { ...n.settings, ...settings } }
+              ? {
+                  ...n,
+                  settings: {
+                    autoConnect: n.settings?.autoConnect ?? false,
+                    redirectUrl: n.settings?.redirectUrl ?? null,
+                    hidden: n.settings?.hidden ?? false,
+                    priority: n.settings?.priority ?? 0,
+                    redirectTimeout: n.settings?.redirectTimeout ?? 3000,
+                    ...settings
+                  }
+                }
               : n
           ),
         }));

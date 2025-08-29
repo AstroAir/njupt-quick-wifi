@@ -20,12 +20,16 @@ import { Settings } from "@/components/settings";
 import { NetworkFilters } from "@/components/network-filters";
 import { motion, AnimatePresence } from "framer-motion";
 import type { WiFiNetwork } from "@/types";
+import { OnboardingFlow } from "@/components/onboarding/onboarding-flow";
+import { HelpSystem } from "@/components/help/help-system";
+import { UserGuidance } from "@/components/guidance/user-guidance";
+import { FeatureTutorials } from "@/components/tutorials/feature-tutorials";
+import { ErrorRecovery } from "@/components/error-handling/error-recovery";
+import { SmartConnectionManager } from "@/components/connection/smart-connection-manager";
+import { MobileMenu } from "@/components/ui/mobile-menu";
+// import { useIsMobile } from "@/hooks/use-mobile";
 
-// 定义扫描结果的接口
-interface ScanResult {
-  networks: WiFiNetwork[];
-  timestamp: number;
-}
+
 
 export function WifiManager() {
   const [showFilters, setShowFilters] = useState(false);
@@ -33,6 +37,8 @@ export function WifiManager() {
   const [retryCount, setRetryCount] = useState(0);
   const [networkError, setNetworkError] = useState<string | null>(null);
   const [lastScanSuccess, setLastScanSuccess] = useState(true);
+  const [activeTab, setActiveTab] = useState("available");
+  // const isMobile = useIsMobile();
 
   const {
     savedNetworks,
@@ -60,14 +66,13 @@ export function WifiManager() {
     async (showToast = true) => {
       try {
         setLastScanSuccess(false);
-        const result = await scanNetworks();
+        await scanNetworks();
         setLastScanSuccess(true);
         setRetryCount(0);
 
-        if (showToast && result?.networks?.length > 0) {
-          toast.success(`找到 ${result.networks.length} 个WiFi网络`);
+        if (showToast && filteredNetworks.length > 0) {
+          toast.success(`找到 ${filteredNetworks.length} 个WiFi网络`);
         }
-        return result;
       } catch (error) {
         console.error("扫描网络出错:", error);
         setLastScanSuccess(false);
@@ -87,10 +92,9 @@ export function WifiManager() {
             },
           });
         }
-        return null;
       }
     },
-    [scanNetworks]
+    [scanNetworks, filteredNetworks.length]
   );
 
   // 初始网络扫描和动画
@@ -269,15 +273,17 @@ export function WifiManager() {
   );
 
   return (
-    <AnimatePresence>
-      <motion.div
-        className="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden"
+    <>
+      <AnimatePresence>
+        <motion.div
+        className="w-full bg-white dark:bg-gray-800 rounded-lg sm:rounded-xl shadow-md overflow-hidden"
         initial={animationsEnabled ? { opacity: 0, y: 20 } : undefined}
         animate={animationsEnabled ? { opacity: 1, y: 0 } : undefined}
         transition={{ duration: 0.8, ease: "easeOut" }}
       >
+        {/* Connection Status Section - Responsive padding */}
         <motion.div
-          className="p-4 border-b"
+          className="p-3 sm:p-4 lg:p-6 border-b border-gray-200 dark:border-gray-700"
           initial={animationsEnabled ? { opacity: 0 } : undefined}
           animate={animationsEnabled ? { opacity: 1 } : undefined}
           transition={{ delay: 0.3, duration: 0.5 }}
@@ -298,27 +304,48 @@ export function WifiManager() {
           {networkError && !isOffline && <NetworkErrorComponent />}
         </AnimatePresence>
 
-        <Tabs defaultValue="available" className="w-full">
-          <div className="px-4 pt-3 flex justify-between items-center">
-            <TabsList className="flex-1 max-w-md">
-              <TabsTrigger value="available" className="flex-1">
-                可用网络
-              </TabsTrigger>
-              <TabsTrigger value="saved" className="flex-1">
-                已保存网络
-              </TabsTrigger>
-              <TabsTrigger value="settings" className="flex-1">
-                <SettingsIcon className="h-4 w-4" />
-              </TabsTrigger>
-            </TabsList>
+        <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
+          {/* Responsive navigation - Mobile menu for very small screens, tabs for larger screens */}
+          <div className="px-3 sm:px-4 lg:px-6 pt-3 sm:pt-4">
+            {/* Mobile menu for screens smaller than 480px */}
+            <div className="block xs:hidden">
+              <MobileMenu
+                activeTab={activeTab}
+                onTabChange={setActiveTab}
+                className="w-full"
+              />
+            </div>
+
+            {/* Tab navigation for larger screens */}
+            <div className="hidden xs:flex justify-between items-center">
+              <TabsList className="flex-1 w-full max-w-none sm:max-w-2xl grid grid-cols-4 gap-1">
+                <TabsTrigger value="available" className="flex-1 text-xs sm:text-sm px-2 sm:px-3 min-h-[44px]">
+                  <span className="hidden sm:inline">可用网络</span>
+                  <span className="sm:hidden">可用</span>
+                </TabsTrigger>
+                <TabsTrigger value="saved" className="flex-1 text-xs sm:text-sm px-2 sm:px-3 min-h-[44px]">
+                  <span className="hidden sm:inline">已保存网络</span>
+                  <span className="sm:hidden">已保存</span>
+                </TabsTrigger>
+                <TabsTrigger value="smart" className="flex-1 text-xs sm:text-sm px-2 sm:px-3 min-h-[44px]">
+                  <span className="hidden sm:inline">智能连接</span>
+                  <span className="sm:hidden">智能</span>
+                </TabsTrigger>
+                <TabsTrigger value="settings" className="flex-1 text-xs sm:text-sm px-2 sm:px-3 min-h-[44px]">
+                  <SettingsIcon className="h-3 w-3 sm:h-4 sm:w-4 mx-auto" />
+                  <span className="sr-only">设置</span>
+                </TabsTrigger>
+              </TabsList>
+            </div>
           </div>
 
-          <TabsContent value="available" className="p-4">
-            <div className="flex justify-between items-center mb-4">
-              <div>
-                <h2 className="text-lg font-medium">可用网络</h2>
+          <TabsContent value="available" className="p-3 sm:p-4 lg:p-6">
+            {/* Responsive header section */}
+            <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3 sm:gap-4 mb-4 sm:mb-6">
+              <div className="flex-1 min-w-0">
+                <h2 className="text-base sm:text-lg font-medium text-gray-900 dark:text-white">可用网络</h2>
                 {lastScanTime && (
-                  <p className="text-xs text-muted-foreground">
+                  <p className="text-xs sm:text-sm text-muted-foreground mt-1 truncate">
                     最近扫描: {formatLastScanTime()}
                     {!lastScanSuccess && (
                       <span className="text-red-500"> (扫描失败)</span>
@@ -326,30 +353,35 @@ export function WifiManager() {
                   </p>
                 )}
               </div>
-              <div className="flex gap-2">
+              {/* Responsive button group */}
+              <div className="flex gap-2 sm:gap-3 flex-shrink-0">
                 <Button
                   variant="outline"
                   size="sm"
                   onClick={() => setShowFilters(!showFilters)}
+                  className="flex-1 sm:flex-none min-h-[44px]"
                 >
-                  <FilterIcon className="h-4 w-4 mr-2" />
-                  筛选
+                  <FilterIcon className="h-4 w-4 sm:mr-2" />
+                  <span className="hidden sm:inline">筛选</span>
                 </Button>
                 <Button
                   variant="outline"
                   size="sm"
                   onClick={() => handleScan(true)}
                   disabled={isScanning || isOffline}
+                  data-tutorial="scan-button"
+                  className="flex-1 sm:flex-none min-h-[44px]"
                 >
                   {isScanning ? (
                     <>
-                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                      扫描中... {scanProgress}%
+                      <Loader2 className="h-4 w-4 sm:mr-2 animate-spin" />
+                      <span className="hidden sm:inline">扫描中... {scanProgress}%</span>
+                      <span className="sm:hidden">{scanProgress}%</span>
                     </>
                   ) : (
                     <>
-                      <RefreshCw className="h-4 w-4 mr-2" />
-                      扫描
+                      <RefreshCw className="h-4 w-4 sm:mr-2" />
+                      <span className="hidden sm:inline">扫描</span>
                     </>
                   )}
                 </Button>
@@ -390,7 +422,7 @@ export function WifiManager() {
             />
           </TabsContent>
 
-          <TabsContent value="saved" className="p-4">
+          <TabsContent value="saved" className="p-3 sm:p-4 lg:p-6">
             <SavedNetworks
               networks={savedNetworks}
               currentNetwork={currentNetwork}
@@ -402,11 +434,23 @@ export function WifiManager() {
             />
           </TabsContent>
 
-          <TabsContent value="settings" className="p-4">
+          <TabsContent value="smart" className="p-3 sm:p-4 lg:p-6">
+            <SmartConnectionManager />
+          </TabsContent>
+
+          <TabsContent value="settings" className="p-3 sm:p-4 lg:p-6">
             <Settings />
           </TabsContent>
         </Tabs>
-      </motion.div>
-    </AnimatePresence>
+        </motion.div>
+      </AnimatePresence>
+
+      {/* Enhanced Usage Logic Components */}
+      <OnboardingFlow />
+      <HelpSystem />
+      <UserGuidance />
+      <FeatureTutorials />
+      <ErrorRecovery />
+    </>
   );
 }
